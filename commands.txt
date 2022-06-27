@@ -1,0 +1,7 @@
+sudo insmod hello.ko
+
+sudo rmmod hello
+
+tail /var/log/syslog
+
+lsmod
