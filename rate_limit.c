@@ -59,28 +59,35 @@ static int etn_rate_limiter_probe(struct platform_device *pdev)
 	}
 
 	// Получение самого устройства
-	rl_dev->fan = stcmtk_fpga_get_feature(rl_dev->fpga, FPGA_FEATURE_FAN);
+	rl_dev->fan = stcmtk_fpga_get_feature(rl_dev->fpga, FPGA_FEATURE_RX_RATE_LIMIT);
 	if (!rl_dev->fan) {
-		printk("Failed to get FPGA_FEATURE_FAN\n");
+		printk("Failed to get FPGA_FEATURE_RX_RATE_LIMIT\n");
 		goto err_put;
 	}
 
 	uint32_t num;
 	// Читаем номер устройства
-	if (!of_property_read_u32_array(np, "port-num", &num, 1))
+	int err = of_property_read_u32(np, "port-num", &num);
+	if (err)
 	{
-		printk("Failed to get port-num\n");
+		printk("Failed to get port-num. Err: %d\n", err);
 		goto err_num_port;
 	}
 
-	uint16_t cr = stcmtk_get_cr_base_on_port(rl_dev->fan, num);
-	cr *= 2;
+	platform_set_drvdata(pdev, rl_dev);
+
+	uint32_t cr = stcmtk_get_cr_base_on_port(rl_dev->fan, num);
+	printk("cr: %d\n", cr);
 
 	struct stcmtk_common_fpga *fpga = rl_dev->fpga;
-	uint32_t tmp;
-	regmap_read(fpga->regmap, cr, &tmp);
-	cr = !cr;
-	regmap_write(fpga->regmap, cr, tmp);
+	uint32_t tmp = 0xFF;
+	int r_err = regmap_read(fpga->regmap, cr, &tmp);
+	printk("Reg: %d, e_err: %d\n", tmp, r_err);
+	tmp = !tmp;
+	int w_err = regmap_write(fpga->regmap, cr, tmp);
+	printk("Reg!: %d, w_wrr: %d\n", tmp, w_err);
+
+	return 0;
 
 err_num_port:
 err_put:
@@ -90,6 +97,14 @@ err_ref:
 }
 static int etn_rate_limiter_remove(struct platform_device *pdev)
 {
+	struct etn_rate_limiter *rl_dev = platform_get_drvdata(pdev);
+	if (rl_dev == NULL)
+	{
+		dev_info(&pdev->dev, "rl_dev is NULL. Line: %d\n", __LINE__);
+		return 0;
+	}
+
+	etn_fpga_ref_put(rl_dev->fpga); // Умньшить счетчик ссылок
 	return 0;
 }
 
@@ -118,9 +133,9 @@ static int __init rate_limiter_init(void)
 	}
 	return 0;
 }
-static void __init rate_limiter_exit(void)
+static void __exit rate_limiter_exit(void)
 {
-	//platform_driver_unregister(&etn_rate_limiter_driver);
+	platform_driver_unregister(&etn_rate_limiter_driver);
 }
 
 MODULE_LICENSE("GPL v2");
