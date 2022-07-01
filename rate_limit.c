@@ -34,6 +34,10 @@ static struct class *class;
 #define DRIVER_NAME "ratelimiter%d"
 #define DRIVER_CLASS "RateLimiterClass"
 
+#define SYSFS_FOLDER DRIVER_NAME
+
+uint32_t clk = 250000;
+
 /* Buffer for data */
 static char buffer[255];
 static int buffer_pointer = 0;
@@ -49,6 +53,11 @@ struct etn_rate_limiter
 	//char dev
 	struct cdev device;
 	dev_t device_nr;
+
+	//sysfs
+	struct kobject *kobj;
+	struct kobj_attribute attr_status;
+	struct kobj_attribute attr_rate;
 };
 
 struct file_package
@@ -57,6 +66,7 @@ struct file_package
 	uint16_t rate;
 };
 
+// -- chardev -- //
 static ssize_t driver_read(struct file *File, char *user_buffer, size_t count, loff_t *offs) {
 	long long to_copy, not_copied, delta;
 
@@ -144,7 +154,7 @@ static int init_char_dev(struct etn_rate_limiter *rl_dev)
 		goto add_err;
 	}
 
-	printk("Create char dev SUCCESS\n");
+	printk("Create char dev %s SUCCESS\n", file_name);
 	return 0;
 add_err:
 	cdev_del(&rl_dev->device);
@@ -161,6 +171,108 @@ static void destrou_char_dev(struct etn_rate_limiter *rl_dev)
 	unregister_chrdev_region(rl_dev->device_nr, 1);
 	printk("Destroy char dev SUCCESS\n");
 }
+// -- chardev -- //
+
+// -- sysfs -- //
+static ssize_t dummy_status_show(struct kobject *kobj, struct kobj_attribute *attr, char *buffer) {
+	struct etn_rate_limiter* rl_dev = container_of(attr, struct etn_rate_limiter, attr_status);
+	
+	uint32_t b;
+	regmap_read(rl_dev->fpga->regmap, rl_dev->cr, &b);
+
+	return snprintf(buffer, PAGE_SIZE, "%u", b);
+}
+static ssize_t dummy_status_store(struct kobject *kobj, struct kobj_attribute *attr, const char *buffer, size_t count) {
+	struct etn_rate_limiter* rl_dev = container_of(attr, struct etn_rate_limiter, attr_status);
+	uint16_t buf;
+
+	if (buffer[count] != '\0')
+		return -EINVAL;
+
+	int err = kstrtou16(buffer, 10, &buf);
+	if (err)
+		return -err;
+
+	regmap_write(rl_dev->fpga->regmap, rl_dev->cr, buf);
+
+	return count;
+}
+static ssize_t dummy_rate_show(struct kobject *kobj, struct kobj_attribute *attr, char *buffer) {
+	struct etn_rate_limiter* rl_dev = container_of(attr, struct etn_rate_limiter, attr_rate);
+	
+	uint32_t b;
+	regmap_read(rl_dev->fpga->regmap, rl_dev->cr+1, &b);
+	b *= clk;
+
+	return snprintf(buffer, PAGE_SIZE, "%u", b);
+}
+static ssize_t dummy_rate_store(struct kobject *kobj, struct kobj_attribute *attr, const char *buffer, size_t count) {
+	struct etn_rate_limiter* rl_dev = container_of(attr, struct etn_rate_limiter, attr_rate);
+	uint32_t buf;
+
+	if (buffer[count] != '\0')
+		return -1;
+
+	if (kstrtou32(buffer, 10, &buf))
+		return -1;
+
+	buf /= clk;
+
+	regmap_write(rl_dev->fpga->regmap, rl_dev->cr+1, buf);
+
+	return count;
+}
+
+static struct kobj_attribute attr_status = __ATTR(status, 0660, dummy_status_show, dummy_status_store);
+static struct kobj_attribute attr_rate = __ATTR(rate, 0660, dummy_rate_show, dummy_rate_store);
+
+static int init_sysfs(struct etn_rate_limiter *rl_dev)
+{
+	/* Fill attribute */
+	rl_dev->attr_status = attr_status;
+	rl_dev->attr_rate =   attr_rate;
+
+	char folder_name[256] = {0};
+	snprintf(folder_name, 256, SYSFS_FOLDER, rl_dev->num);
+
+	/* Creating the folder */
+	rl_dev->kobj = kobject_create_and_add(folder_name, kernel_kobj);
+	if(!rl_dev->kobj) {
+		printk("sysfs - Error creating /sys/kernel/%s\n", folder_name);
+		goto err_kobject_create;
+	}
+
+	/* Creade the sysfs file status */
+	if(sysfs_create_file(rl_dev->kobj, &rl_dev->attr_status.attr)) {
+		printk("sysfs_test - Error creating /sys/kernel/%s/status\n", folder_name);
+		goto err_create_status;
+	}
+
+	/* Creade the sysfs file rate */
+	if(sysfs_create_file(rl_dev->kobj, &rl_dev->attr_rate.attr)) {
+		printk("sysfs_test - Error creating /sys/kernel/%s/rate\n", folder_name);
+		goto err_create_rate;
+	}
+
+	printk("Create sysfs %s SUCCESS\n", folder_name);
+	return 0;
+
+	sysfs_remove_file(rl_dev->kobj, &rl_dev->attr_rate.attr);
+err_create_rate:
+	sysfs_remove_file(rl_dev->kobj, &rl_dev->attr_status.attr);
+err_create_status:
+	kobject_put(rl_dev->kobj);
+err_kobject_create:
+	return -1;
+}
+static void destroy_sysfs(struct etn_rate_limiter *rl_dev)
+{
+	sysfs_remove_file(rl_dev->kobj, &rl_dev->attr_rate.attr);
+	sysfs_remove_file(rl_dev->kobj, &rl_dev->attr_status.attr);
+	kobject_put(rl_dev->kobj);
+}
+
+// -- sysfs -- //
 
 static int etn_rate_limiter_probe(struct platform_device *pdev)
 {
@@ -211,18 +323,18 @@ static int etn_rate_limiter_probe(struct platform_device *pdev)
 	rl_dev->cr = cr;
 	printk("cr: %d\n", cr);
 
-	struct stcmtk_common_fpga *fpga = rl_dev->fpga;
-	uint32_t tmp = 0xFF;
-	int r_err = regmap_read(fpga->regmap, cr, &tmp);
-	printk("Reg: %d, e_err: %d\n", tmp, r_err);
-	tmp = !tmp;
-	int w_err = regmap_write(fpga->regmap, cr, tmp);
-	printk("Reg!: %d, w_wrr: %d\n", tmp, w_err);
+	if(init_char_dev(rl_dev))
+		goto err_char_dev;
 
-	int cd_err = init_char_dev(rl_dev);
+	if(init_sysfs(rl_dev))
+		goto err_sysdev;
 
 	return 0;
 
+	destroy_sysfs(rl_dev);
+err_sysdev:
+	destrou_char_dev(rl_dev);
+err_char_dev:
 err_num_port:
 err_put:
 	etn_fpga_ref_put(rl_dev->fpga); // Умньшить счетчик ссылок
@@ -233,6 +345,7 @@ static int etn_rate_limiter_remove(struct platform_device *pdev)
 {
 	struct etn_rate_limiter *rl_dev = platform_get_drvdata(pdev);
 
+	destroy_sysfs(rl_dev);
 	destrou_char_dev(rl_dev);
 
 	if (rl_dev == NULL)
