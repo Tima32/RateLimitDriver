@@ -38,10 +38,6 @@ static struct class *class;
 
 uint32_t clk = 250000;
 
-/* Buffer for data */
-static char buffer[255];
-static int buffer_pointer = 0;
-
 struct etn_rate_limiter
 {
 	struct stcmtk_common_fpga	*fpga;
@@ -68,7 +64,7 @@ struct file_package
 
 // -- chardev -- //
 static ssize_t driver_read(struct file *File, char *user_buffer, size_t count, loff_t *offs) {
-	long long to_copy, not_copied, delta;
+	size_t to_copy, not_copied, delta;
 
 	struct file_package buffer_package;
 	char* buffer = (char*)&buffer_package;
@@ -95,14 +91,16 @@ static ssize_t driver_read(struct file *File, char *user_buffer, size_t count, l
 	return delta;
 }
 static ssize_t driver_write(struct file *File, const char *user_buffer, size_t count, loff_t *offs) {
-	
+	struct file_package buffer;
+	struct etn_rate_limiter* rl;
+	int ret = 1;
+
 	if (count < sizeof(struct file_package))
 		return 0;
 
-	struct file_package buffer;
-
-	copy_from_user(&buffer, user_buffer, sizeof(struct file_package));
-	struct etn_rate_limiter* rl = File->private_data;
+	if ((ret = copy_from_user(&buffer, user_buffer, sizeof(struct file_package))) != 0)
+		return -ret;
+	rl = File->private_data;
 	regmap_write(rl->fpga->regmap, rl->cr, buffer.enable);
 	regmap_write(rl->fpga->regmap, rl->cr+1, buffer.rate);
 
@@ -176,20 +174,21 @@ static void destrou_char_dev(struct etn_rate_limiter *rl_dev)
 // -- sysfs -- //
 static ssize_t dummy_status_show(struct kobject *kobj, struct kobj_attribute *attr, char *buffer) {
 	struct etn_rate_limiter* rl_dev = container_of(attr, struct etn_rate_limiter, attr_status);
-	
 	uint32_t b;
+
 	regmap_read(rl_dev->fpga->regmap, rl_dev->cr, &b);
 
 	return snprintf(buffer, PAGE_SIZE, "%u", b);
 }
 static ssize_t dummy_status_store(struct kobject *kobj, struct kobj_attribute *attr, const char *buffer, size_t count) {
+	int err;
 	struct etn_rate_limiter* rl_dev = container_of(attr, struct etn_rate_limiter, attr_status);
 	uint16_t buf;
 
 	if (buffer[count] != '\0')
 		return -EINVAL;
 
-	int err = kstrtou16(buffer, 10, &buf);
+	err = kstrtou16(buffer, 10, &buf);
 	if (err)
 		return -err;
 
@@ -228,11 +227,12 @@ static struct kobj_attribute attr_rate = __ATTR(rate, 0660, dummy_rate_show, dum
 
 static int init_sysfs(struct etn_rate_limiter *rl_dev)
 {
+	char folder_name[256] = {0};
+
 	/* Fill attribute */
 	rl_dev->attr_status = attr_status;
 	rl_dev->attr_rate =   attr_rate;
 
-	char folder_name[256] = {0};
 	snprintf(folder_name, 256, SYSFS_FOLDER, rl_dev->num);
 
 	/* Creating the folder */
@@ -277,7 +277,9 @@ static void destroy_sysfs(struct etn_rate_limiter *rl_dev)
 static int etn_rate_limiter_probe(struct platform_device *pdev)
 {
 	struct etn_rate_limiter *rl_dev;
-	int ret = 0;
+	int ret = 1;
+	uint32_t num; // Номер устройства
+	uint32_t cr;
 
 	//struct device *dev = &pdev->dev;
 	struct device_node *np = pdev->dev.of_node; // Получение указателя на узел dev_tree моего устройства в памяти
@@ -286,7 +288,7 @@ static int etn_rate_limiter_probe(struct platform_device *pdev)
 	if (!rl_dev)
 		return -ENOMEM;
 
-	rl_dev->pdev = pdev; //??????
+	rl_dev->pdev = pdev;
 
 	rl_dev->fpga = stcmtk_get_fpga(np);
 	if (!rl_dev->fpga) {
@@ -307,19 +309,18 @@ static int etn_rate_limiter_probe(struct platform_device *pdev)
 		goto err_put;
 	}
 
-	uint32_t num;
 	// Читаем номер устройства
-	int err = of_property_read_u32(np, "port-num", &num);
-	if (err)
+	ret = of_property_read_u32(np, "port-num", &num);
+	if (ret)
 	{
-		printk("Failed to get port-num. Err: %d\n", err);
+		printk("Failed to get port-num. Err: %d\n", ret);
 		goto err_num_port;
 	}
 	rl_dev->num = num;
 
 	platform_set_drvdata(pdev, rl_dev);
 
-	uint32_t cr = stcmtk_get_cr_base_on_port(rl_dev->fan, num);
+	cr = stcmtk_get_cr_base_on_port(rl_dev->fan, num);
 	rl_dev->cr = cr;
 	printk("cr: %d\n", cr);
 
@@ -339,7 +340,7 @@ err_num_port:
 err_put:
 	etn_fpga_ref_put(rl_dev->fpga); // Умньшить счетчик ссылок
 err_ref:
-	return -EFAULT;
+	return -ret;
 }
 static int etn_rate_limiter_remove(struct platform_device *pdev)
 {
@@ -376,8 +377,6 @@ static struct platform_driver etn_rate_limiter_driver = {
 
 static int __init rate_limiter_init(void)
 {
-	int retval;
-
 	printk("Hello world.\n");
 
 	/* Create device class */
@@ -385,7 +384,6 @@ static int __init rate_limiter_init(void)
 		printk("Device class can not be created!\n");
 		goto class_err;
 	}
-	printk("create class: SUCCESS\n");
 
 	//----------------//
 	
@@ -399,7 +397,7 @@ static int __init rate_limiter_init(void)
 driver_register_err:
 	class_destroy(class);
 class_err:
-	return -1;
+	return -EIO;
 }
 static void __exit rate_limiter_exit(void)
 {
@@ -408,7 +406,7 @@ static void __exit rate_limiter_exit(void)
 }
 
 MODULE_LICENSE("GPL v2");
-MODULE_AUTHOR("STC Metrotek System Team <system@metrotek.ru>");
+MODULE_AUTHOR("Golovlev Timofei <4timonomit4@gmail.com>");
 MODULE_DESCRIPTION("Beeper driver for PROBE devices");
 
 module_init(rate_limiter_init);
