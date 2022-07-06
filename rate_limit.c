@@ -93,13 +93,13 @@ static ssize_t driver_read(struct file *File, char *user_buffer, size_t count, l
 static ssize_t driver_write(struct file *File, const char *user_buffer, size_t count, loff_t *offs) {
 	struct file_package buffer;
 	struct etn_rate_limiter* rl;
-	int ret = 1;
+	size_t not_copied = 1;
 
 	if (count < sizeof(struct file_package))
 		return 0;
 
-	if ((ret = copy_from_user(&buffer, user_buffer, sizeof(struct file_package))) != 0)
-		return -ret;
+	if ((not_copied = copy_from_user(&buffer, user_buffer, sizeof(struct file_package))) != 0)
+		return -EIO;
 	rl = File->private_data;
 	regmap_write(rl->fpga->regmap, rl->cr, buffer.enable);
 	regmap_write(rl->fpga->regmap, rl->cr+1, buffer.rate);
