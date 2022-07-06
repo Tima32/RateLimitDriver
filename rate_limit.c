@@ -41,7 +41,7 @@ uint32_t clk = 250000;
 struct etn_rate_limiter
 {
 	struct stcmtk_common_fpga	*fpga;
-	struct fpga_feature		    *fan; // пере.
+	struct fpga_feature		    *limiter; // пере.
 	struct platform_device		*pdev;
 	uint32_t cr;
 	int32_t num;
@@ -303,8 +303,8 @@ static int etn_rate_limiter_probe(struct platform_device *pdev)
 	}
 
 	// Получение самого устройства
-	rl_dev->fan = stcmtk_fpga_get_feature(rl_dev->fpga, FPGA_FEATURE_RX_RATE_LIMIT);
-	if (!rl_dev->fan) {
+	rl_dev->limiter = stcmtk_fpga_get_feature(rl_dev->fpga, FPGA_FEATURE_RX_RATE_LIMIT);
+	if (!rl_dev->limiter) {
 		printk("Failed to get FPGA_FEATURE_RX_RATE_LIMIT\n");
 		goto err_put;
 	}
@@ -320,7 +320,7 @@ static int etn_rate_limiter_probe(struct platform_device *pdev)
 
 	platform_set_drvdata(pdev, rl_dev);
 
-	cr = stcmtk_get_cr_base_on_port(rl_dev->fan, num);
+	cr = stcmtk_get_cr_base_on_port(rl_dev->limiter, num);
 	rl_dev->cr = cr;
 	printk("cr: %d\n", cr);
 
